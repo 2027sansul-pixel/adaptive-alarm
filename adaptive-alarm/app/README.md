@@ -41,7 +41,13 @@ test/
 flutter pub get
 flutter test          # core 포팅 parity 검증 (Python 골든값과 일치하는지)
 flutter run           # 실기기/에뮬레이터
+
+# Flutter 없이 core 로직만 검증 (Dart SDK만 있으면 됨):
+dart run tool/core_check.dart   # 22개 골든 체크, Python과 동일 값 확인
 ```
+
+> **검증됨**: `lib/core/`는 순수 Dart(Flutter 무관)라 Dart SDK만으로 실행·검증된다.
+> Python과 동일 시나리오에서 교체 제안일·EWMA가 부동소수점 끝자리까지 일치함을 확인했다.
 
 홈 화면의 **"지금 울리기(테스트)"** 버튼으로 실제 알람 시각을 기다리지 않고
 울림→끄기→(제안) 전체 흐름을 바로 확인할 수 있다.
