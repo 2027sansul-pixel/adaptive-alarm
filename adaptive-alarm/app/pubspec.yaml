@@ -1,0 +1,27 @@
+name: adaptive_alarm
+description: 습관화 과학에 근거한 적응형 알람 앱
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.10.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # OS 정밀 알람 + 알림 (화면 꺼져 있어도 울려야 하므로 핵심)
+  android_alarm_manager_plus: ^4.0.0
+  flutter_local_notifications: ^17.0.0
+  # 엔진 상태 JSON 영속화
+  shared_preferences: ^2.2.0
+  # 알람음 재생
+  audioplayers: ^6.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
