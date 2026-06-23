@@ -1,10 +1,11 @@
 """시뮬레이션 하니스. `python -m sim.run` 으로 실행.
 
+핵심: UserSim은 실제 AlarmEngine을 구동한다. 즉 시뮬레이션이 검증하는 것은
+별도로 재구현한 로직이 아니라 앱에 들어갈 그 시스템 자체다.
+
 두 가지를 보여준다.
   1) 한 사용자의 하루하루 추적(점수·EWMA·상한선·교체 이벤트) 텍스트 트레이스
-  2) 다수 사용자에 대한 집계 지표
-       - 습관화 그룹: 교체까지 걸린 평균 일수(탐지 지연), 평균 교체 횟수
-       - 대조 그룹(습관화 없음): 헛 교체(오탐) 비율
+  2) 다수 사용자에 대한 집계 지표(탐지율·탐지 지연·오탐률)
 
 evaluate() 는 sim/tune.py 의 파라미터 스윕에서도 재사용된다.
 """
@@ -16,68 +17,46 @@ from dataclasses import dataclass
 
 from core import scoring
 from core.config import DEFAULT, Params
-from core.decision import select_next_sound, should_propose_swap
-from core.trend import control_limit, reset_for_new_sound, update
-from sim.generate import CATALOG, CATALOG_BY_ID, SimUser, population_priors
+from core.engine import AlarmEngine
+from sim.generate import CATALOG, SimUser
 
 
 class UserSim:
-    """한 사용자에 대한 전체 시뮬레이션 진행 상태."""
+    """한 사용자에 대한 시뮬레이션. 내부에서 실제 AlarmEngine을 돌린다."""
 
     def __init__(self, user: SimUser, start_sound: str, params: Params = DEFAULT):
         self.user = user
-        self.params = params
-        self.current_sound = start_sound
-        self.days_on_sound = 0
-        self.days_since_swap = 10_000          # 처음엔 제약 없음
-        self.recently_used = [start_sound]
-        self.state = reset_for_new_sound()
-        self.swap_days: list[int] = []         # 교체가 일어난 일자들
+        self.engine = AlarmEngine.new(CATALOG, start_sound, params=params)
+        self.swap_days: list[int] = []
 
     def step(self, day_index: int) -> dict:
-        p = self.params
-        pop_mean, pop_sigma = population_priors()
-        rec = self.user.make_record(day_index, self.current_sound, self.days_on_sound)
-        score = scoring.deconfounded_score(rec, p)
+        eng = self.engine
+        sound = eng.state.current_sound
+        days_on = eng.state.days_on_sound  # 현재 음원을 며칠째 쓰는가(습관화 곡선 입력)
 
-        update(self.state, day_index, pop_mean, pop_sigma, score, p)
+        rec = self.user.make_record(day_index, sound, days_on)
+        proposal = eng.record_alarm(rec)
 
-        proposed = should_propose_swap(
-            self.state, rec,
-            days_on_current_sound=self.days_on_sound,
-            days_since_last_swap=self.days_since_swap,
-            params=p,
-        )
+        # 교체 직전(현재 음원)의 추세 값을 트레이스용으로 포착
+        ewma = eng.current_trend().ewma
+        ucl = eng.current_control_limit()
 
-        row = {
+        swapped = False
+        if proposal.propose:
+            eng.accept_swap(proposal.to_sound)  # 시뮬레이션에선 항상 수락
+            self.swap_days.append(day_index)
+            swapped = True
+
+        return {
             "day": day_index,
-            "sound": self.current_sound,
+            "sound": sound,
             "active_s": scoring.active_interaction_seconds(rec),
             "snooze": scoring.snooze_count(rec),
-            "score": score,
-            "ewma": self.state.ewma,
-            "ucl": control_limit(self.state, p),
-            "swap": False,
+            "score": scoring.deconfounded_score(rec, eng.params),
+            "ewma": ewma,
+            "ucl": ucl,
+            "swap": swapped,
         }
-
-        if proposed:
-            # 시뮬레이션에선 제안을 항상 수락한다고 가정(수락률은 별도 변수)
-            nxt = select_next_sound(
-                CATALOG_BY_ID[self.current_sound], CATALOG, self.recently_used,
-                critical_wakeup=False,
-            )
-            self.current_sound = nxt.sound_id
-            self.recently_used = (self.recently_used + [nxt.sound_id])[-3:]
-            self.days_on_sound = 0
-            self.days_since_swap = 0
-            self.state = reset_for_new_sound()
-            self.swap_days.append(day_index)
-            row["swap"] = True
-        else:
-            self.days_on_sound += 1
-            self.days_since_swap += 1
-
-        return row
 
 
 @dataclass
@@ -143,7 +122,7 @@ def trace_one_user(seed: int = 7, days: int = 60, params: Params = DEFAULT) -> N
     print(f"\n교체가 일어난 일자: {sim.swap_days or '없음'}")
 
 
-def print_metrics(m: Metrics, days: int = 90) -> None:
+def print_metrics(m: Metrics) -> None:
     print("\n■ 습관화 그룹(실제로 익숙해지는 사용자)")
     print(f"  - 교체를 한 번이라도 제안받은 비율 : {100*m.detect_rate:.0f}%")
     if m.avg_first_swap >= 0:

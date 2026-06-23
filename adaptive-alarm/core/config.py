@@ -32,6 +32,7 @@ class Params:
     # --- 판정(decision) ---
     consecutive_above: int = 4        # 교체 전 연속으로 기준선 초과해야 할 일수
     min_days_between_swaps: int = 14  # 교체 사이 최소 간격
+    proposal_snooze_days: int = 7     # 제안을 거절하면 이만큼 다시 제안하지 않음
 
 
 DEFAULT = Params()
