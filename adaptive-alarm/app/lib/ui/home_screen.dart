@@ -7,7 +7,8 @@ import 'ring_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final AlarmController controller;
-  const HomeScreen({super.key, required this.controller});
+  final bool autoRing; // 알람으로 깨어난 경우 즉시 울림 화면으로
+  const HomeScreen({super.key, required this.controller, this.autoRing = false});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -24,6 +25,9 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _time = TimeOfDay(hour: c.storage.alarmHour, minute: c.storage.alarmMinute);
     _enabled = c.storage.enabled;
+    if (widget.autoRing) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _ringNow());
+    }
   }
 
   Future<void> _pickTime() async {
