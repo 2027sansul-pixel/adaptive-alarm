@@ -5,23 +5,28 @@
   2) 다수 사용자에 대한 집계 지표
        - 습관화 그룹: 교체까지 걸린 평균 일수(탐지 지연), 평균 교체 횟수
        - 대조 그룹(습관화 없음): 헛 교체(오탐) 비율
+
+evaluate() 는 sim/tune.py 의 파라미터 스윕에서도 재사용된다.
 """
 
 from __future__ import annotations
 
 import random
+from dataclasses import dataclass
 
 from core import scoring
+from core.config import DEFAULT, Params
 from core.decision import select_next_sound, should_propose_swap
-from core.trend import TrendState, reset_for_new_sound, update, control_limit
+from core.trend import control_limit, reset_for_new_sound, update
 from sim.generate import CATALOG, CATALOG_BY_ID, SimUser, population_priors
 
 
 class UserSim:
     """한 사용자에 대한 전체 시뮬레이션 진행 상태."""
 
-    def __init__(self, user: SimUser, start_sound: str):
+    def __init__(self, user: SimUser, start_sound: str, params: Params = DEFAULT):
         self.user = user
+        self.params = params
         self.current_sound = start_sound
         self.days_on_sound = 0
         self.days_since_swap = 10_000          # 처음엔 제약 없음
@@ -30,16 +35,18 @@ class UserSim:
         self.swap_days: list[int] = []         # 교체가 일어난 일자들
 
     def step(self, day_index: int) -> dict:
+        p = self.params
         pop_mean, pop_sigma = population_priors()
         rec = self.user.make_record(day_index, self.current_sound, self.days_on_sound)
-        score = scoring.deconfounded_score(rec)
+        score = scoring.deconfounded_score(rec, p)
 
-        update(self.state, day_index, pop_mean, pop_sigma, score)
+        update(self.state, day_index, pop_mean, pop_sigma, score, p)
 
         proposed = should_propose_swap(
             self.state, rec,
             days_on_current_sound=self.days_on_sound,
             days_since_last_swap=self.days_since_swap,
+            params=p,
         )
 
         row = {
@@ -49,7 +56,7 @@ class UserSim:
             "snooze": scoring.snooze_count(rec),
             "score": score,
             "ewma": self.state.ewma,
-            "ucl": control_limit(self.state),
+            "ucl": control_limit(self.state, p),
             "swap": False,
         }
 
@@ -73,10 +80,52 @@ class UserSim:
         return row
 
 
-def trace_one_user(seed: int = 7, days: int = 60) -> None:
+@dataclass
+class Metrics:
+    detect_rate: float        # 습관화 그룹 중 교체를 1회 이상 받은 비율(0~1)
+    avg_first_swap: float     # 첫 교체까지 평균 일수(탐지 지연), 없으면 -1
+    avg_swaps: float          # 습관화 그룹 사용자당 평균 교체 횟수
+    fp_user_rate: float       # 대조 그룹 중 헛 교체 1회 이상 비율(0~1)
+    fp_per_100d: float        # 대조 그룹 사용자·100일당 헛 교체 수
+
+
+def evaluate(params: Params = DEFAULT, n_users: int = 300, days: int = 90) -> Metrics:
+    """주어진 파라미터로 두 그룹을 시뮬레이션하고 지표를 돌려준다(재현 가능)."""
+    first_swap_days: list[int] = []
+    swap_counts: list[int] = []
+    for i in range(n_users):
+        rng = random.Random(1000 + i)
+        sim = UserSim(SimUser(rng, habituates=True), "melody_a", params)
+        for d in range(days):
+            sim.step(d)
+        if sim.swap_days:
+            first_swap_days.append(sim.swap_days[0])
+            swap_counts.append(len(sim.swap_days))
+
+    control_with_swap = 0
+    control_total_swaps = 0
+    for i in range(n_users):
+        rng = random.Random(5000 + i)
+        sim = UserSim(SimUser(rng, habituates=False), "melody_a", params)
+        for d in range(days):
+            sim.step(d)
+        if sim.swap_days:
+            control_with_swap += 1
+        control_total_swaps += len(sim.swap_days)
+
+    return Metrics(
+        detect_rate=len(first_swap_days) / n_users,
+        avg_first_swap=(sum(first_swap_days) / len(first_swap_days)) if first_swap_days else -1.0,
+        avg_swaps=(sum(swap_counts) / len(swap_counts)) if swap_counts else 0.0,
+        fp_user_rate=control_with_swap / n_users,
+        fp_per_100d=control_total_swaps / (n_users * days) * 100,
+    )
+
+
+def trace_one_user(seed: int = 7, days: int = 60, params: Params = DEFAULT) -> None:
     rng = random.Random(seed)
     user = SimUser(rng, habituates=True)
-    sim = UserSim(user, start_sound="melody_a")
+    sim = UserSim(user, "melody_a", params)
 
     print(f"\n{'='*72}")
     print(f"[단일 사용자 트레이스]  습관화 시정수 tau={user.hab_tau_days:.1f}일, "
@@ -94,59 +143,18 @@ def trace_one_user(seed: int = 7, days: int = 60) -> None:
     print(f"\n교체가 일어난 일자: {sim.swap_days or '없음'}")
 
 
-def aggregate(n_users: int = 300, days: int = 90) -> None:
-    print(f"\n{'='*72}")
-    print(f"[집계]  사용자 {n_users}명 × {days}일")
-    print(f"{'='*72}")
-
-    # --- 습관화 그룹 ---
-    first_swap_days: list[int] = []
-    swap_counts: list[int] = []
-    never_swapped = 0
-    for i in range(n_users):
-        rng = random.Random(1000 + i)
-        sim = UserSim(SimUser(rng, habituates=True), start_sound="melody_a")
-        for d in range(days):
-            sim.step(d)
-        if sim.swap_days:
-            first_swap_days.append(sim.swap_days[0])
-            swap_counts.append(len(sim.swap_days))
-        else:
-            never_swapped += 1
-
-    # --- 대조 그룹(습관화 없음) → 어떤 교체든 오탐 ---
-    control_with_swap = 0
-    control_total_swaps = 0
-    for i in range(n_users):
-        rng = random.Random(5000 + i)
-        sim = UserSim(SimUser(rng, habituates=False), start_sound="melody_a")
-        for d in range(days):
-            sim.step(d)
-        if sim.swap_days:
-            control_with_swap += 1
-        control_total_swaps += len(sim.swap_days)
-
-    detected = len(first_swap_days)
+def print_metrics(m: Metrics, days: int = 90) -> None:
     print("\n■ 습관화 그룹(실제로 익숙해지는 사용자)")
-    print(f"  - 교체를 한 번이라도 제안받은 비율 : {detected}/{n_users} "
-          f"({100*detected/n_users:.0f}%)")
-    if first_swap_days:
-        avg_first = sum(first_swap_days) / len(first_swap_days)
-        print(f"  - 첫 교체까지 평균 일수(탐지 지연): {avg_first:.1f}일")
-        print(f"  - 사용자당 평균 교체 횟수        : {sum(swap_counts)/len(swap_counts):.1f}회")
-    print(f"  - {days}일 내내 한 번도 교체 안 됨   : {never_swapped}명")
-
+    print(f"  - 교체를 한 번이라도 제안받은 비율 : {100*m.detect_rate:.0f}%")
+    if m.avg_first_swap >= 0:
+        print(f"  - 첫 교체까지 평균 일수(탐지 지연): {m.avg_first_swap:.1f}일")
+        print(f"  - 사용자당 평균 교체 횟수        : {m.avg_swaps:.1f}회")
     print("\n■ 대조 그룹(습관화 없음 → 모든 교체가 오탐)")
-    print(f"  - 헛 교체를 1회 이상 한 사용자 비율 : {control_with_swap}/{n_users} "
-          f"({100*control_with_swap/n_users:.1f}%)")
-    fp_per_100d = control_total_swaps / (n_users * days) * 100
-    print(f"  - 오탐률(사용자·100일당 헛 교체 수) : {fp_per_100d:.2f}회")
-
-    print("\n해석: 습관화 그룹의 탐지율·탐지 지연은 높/낮을수록 민감/둔감을, "
-          "대조 그룹 오탐률은 헛 교체 성가심을 뜻한다.\n      "
-          "core/ 의 LAMBDA·L·SNOOZE_WEIGHT·BASELINE_DAYS 를 바꿔가며 둘의 균형을 맞춘다.")
+    print(f"  - 헛 교체를 1회 이상 한 사용자 비율 : {100*m.fp_user_rate:.1f}%")
+    print(f"  - 오탐률(사용자·100일당 헛 교체 수) : {m.fp_per_100d:.2f}회")
 
 
 if __name__ == "__main__":
     trace_one_user()
-    aggregate()
+    print(f"\n{'='*72}\n[집계]  기본 파라미터(DEFAULT)\n{'='*72}")
+    print_metrics(evaluate())

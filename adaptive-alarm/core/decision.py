@@ -2,19 +2,18 @@
 
 교체는 여러 조건을 '동시에' 만족할 때만 제안한다. 하루이틀의 우연한 변동을
 습관화로 오인하지 않기 위해 의도적으로 문턱을 겹쳐 둔다.
+
+튜닝 가능한 상수는 core/config.py 의 Params 에 모여 있다.
 """
 
 from __future__ import annotations
 
 import math
 
+from .config import DEFAULT, Params
 from .models import AlarmRecord, SoundProfile
 from .scoring import is_extreme_sleep_debt
 from .trend import TrendState, control_limit
-
-# 교체 사이 최소 간격(일). 교체 후 새 음원 기준선 재수집 기간과 맞물린다.
-# 기준선이 14일이므로 그보다 짧게 둘 이유가 없어 14로 통일.(보고서 2.3, 2.4 검토 반영)
-MIN_DAYS_BETWEEN_SWAPS = 14
 
 
 def should_propose_swap(
@@ -22,12 +21,13 @@ def should_propose_swap(
     today: AlarmRecord,
     days_on_current_sound: int,
     days_since_last_swap: int,
+    params: Params = DEFAULT,
 ) -> bool:
     """오늘 음원 교체를 제안할지 판정한다. 모든 조건이 참이어야 True.
 
     조건(보고서 2.4):
       1) 기준선이 확정되어 있고 EWMA가 관리 상한선을 넘었다.
-      2) 최근 사흘 연속으로 점수가 기준선을 웃돌았다.
+      2) 최근 N일 연속으로 점수가 기준선을 웃돌았다(N = consecutive_above).
       3) 현재 음원으로 충분히 오래 관찰했다(기준선 확정 이후).
       4) 마지막 교체로부터 최소 간격이 지났다.
       5) 오늘이 극단적 수면 부족이 아니다(그 상승은 습관화가 아닐 가능성이 큼).
@@ -35,20 +35,21 @@ def should_propose_swap(
     if not state.baseline_ready:
         return False
 
-    ucl = control_limit(state)
+    ucl = control_limit(state, params)
     if ucl is None or state.ewma is None or state.ewma <= ucl:
         return False
 
-    if len(state.recent_above) < 3 or not all(state.recent_above):
+    need = params.consecutive_above
+    if len(state.recent_above) < need or not all(state.recent_above):
         return False
 
-    if days_on_current_sound < 1:  # 기준선 확정 자체가 days>=BASELINE_DAYS를 보장
+    if days_on_current_sound < 1:  # 기준선 확정 자체가 days>=baseline_days를 보장
         return False
 
-    if days_since_last_swap < MIN_DAYS_BETWEEN_SWAPS:
+    if days_since_last_swap < params.min_days_between_swaps:
         return False
 
-    if is_extreme_sleep_debt(today):
+    if is_extreme_sleep_debt(today, params):
         return False
 
     return True
